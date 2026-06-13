@@ -1,6 +1,9 @@
-# Environment
+# Secrets / credentials — NEVER commit (this is a public bounty repo)
+# The Seaport access PDF contains a live OIDC client secret.
 .env
 .env.local
+docs/*.pdf
+*.secret
 
 # Dependencies
 node_modules/
@@ -17,6 +20,10 @@ log/
 
 # MCP
 Build-on-Canton-MCP-main/
+
+# Integration: generated DevNet state (party ids) and Python caches
+integration/devnet_state.json
+__pycache__/
 
 # IDE
 .vscode/
