@@ -1,0 +1,42 @@
+module Delegation where
+
+import Holding
+
+-- Delegation module: an owner grants the exchange bounded authority to move a
+-- specific instrument on the owner's behalf, up to maxAmount, until revoked.
+-- The owner is the signatory, so when the exchange exercises a choice during
+-- settlement the resulting sub-transaction carries the owner's authority --
+-- the standard Daml delegation pattern. No private key is ever passed.
+template TradingAuthority
+  with
+    owner      : Party
+    exchange   : Party
+    instrument : Text        -- the instrument this authority covers
+    maxAmount  : Decimal     -- standing pre-authorization ceiling
+  where
+    signatory owner
+    observer  exchange
+
+    -- Used by settlement. Carries owner authority to move a holding. Standing
+    -- authority, so nonconsuming: it survives across auctions until Revoke.
+    --
+    -- Real (Checkpoint 2) body asserts instrument match and amount <= maxAmount,
+    -- failing closed with a named error otherwise.
+    -- Checkpoint 1 stub: debugs its input and delegates to TransferTo.
+    nonconsuming choice UseAuthority : ContractId Holding
+      with
+        holdingCid : ContractId Holding
+        newOwner   : Party
+        amount     : Decimal
+      controller exchange
+      do
+        debug ("Delegation.UseAuthority stub: instrument=" <> instrument
+                 <> " amount=" <> show amount)
+        exercise holdingCid TransferTo with newOwner
+
+    -- Owner can revoke at any time.
+    choice Revoke : ()
+      controller owner
+      do
+        debug "Delegation.Revoke stub"
+        return ()

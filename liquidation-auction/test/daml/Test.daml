@@ -1,0 +1,116 @@
+module Test where
+
+import DA.Optional (isSome, isNone, fromSome)
+import Daml.Script
+
+import Types
+import Holding
+import Delegation
+import Settlement
+
+-- Checkpoint 1 check. The privacy tiers are the product, so this is the
+-- centerpiece test: same auction, three views. We allocate all parties, create
+-- one contract per tier on stub logic, then query as each party and assert
+-- exactly who can and cannot see each tier. Stub choices are exercised last to
+-- prove the debug bodies run.
+
+-- Visibility helpers. queryContractId returns Some only when `p` is a
+-- stakeholder of an active contract, so it is a direct visibility probe.
+mustSee : (Template t, HasEnsure t) => Text -> Party -> ContractId t -> Script ()
+mustSee label p cid = do
+  r <- queryContractId p cid
+  assertMsg (label <> ": expected VISIBLE") (isSome r)
+
+mustNotSee : (Template t, HasEnsure t) => Text -> Party -> ContractId t -> Script ()
+mustNotSee label p cid = do
+  r <- queryContractId p cid
+  assertMsg (label <> ": expected NOT visible") (isNone r)
+
+testPrivacyTiers : Script ()
+testPrivacyTiers = script do
+  -- Stable, long-lived parties (allocated once, reused). §4.
+  owner       <- allocatePartyByHint (PartyIdHint "Owner")
+  owner2      <- allocatePartyByHint (PartyIdHint "Owner2")
+  exchange    <- allocatePartyByHint (PartyIdHint "Exchange")
+  regulator   <- allocatePartyByHint (PartyIdHint "Regulator")
+  publicParty <- allocatePartyByHint (PartyIdHint "PublicParty")
+  issuer      <- allocatePartyByHint (PartyIdHint "Issuer")
+
+  -- CONFIDENTIAL tier: a Holding (signatory owner, observer issuer).
+  holdingCid <- submit owner do
+    createCmd Holding with
+      issuer; owner; instrument = "wETH"; amount = 10.0
+
+  -- Delegation artefact: TradingAuthority (signatory owner, observer exchange).
+  authCid <- submit owner do
+    createCmd TradingAuthority with
+      owner; exchange; instrument = "wETH"; maxAmount = 100.0
+
+  -- PUBLIC tier: AuctionResult (observer publicParty, regulator).
+  now <- getTime
+  auctionCid <- submit exchange do
+    createCmd AuctionResult with
+      exchange; publicParty; regulator
+      clearingPrice = 2000.0; totalVolume = 5.0; timestamp = now
+
+  -- REGULATED tier: SettlementRecord (observer regulator, parties).
+  recordCid <- submit exchange do
+    createCmd SettlementRecord with
+      exchange; regulator
+      parties = [owner, owner2]
+      legs = [ MatchedLeg owner "wETH" (-1.0), MatchedLeg owner2 "wETH" 1.0 ]
+
+  -- ===== Privacy assertions: same auction, three views =====
+
+  -- PUBLIC tape: public + regulator + exchange see it; counterparties do not.
+  mustSee    "AuctionResult/publicParty"  publicParty auctionCid
+  mustSee    "AuctionResult/regulator"    regulator   auctionCid
+  mustSee    "AuctionResult/exchange"     exchange    auctionCid
+  mustNotSee "AuctionResult/owner"        owner       auctionCid
+
+  -- REGULATED record: regulator + both counterparties + exchange; NOT public.
+  mustSee    "SettlementRecord/regulator" regulator   recordCid
+  mustSee    "SettlementRecord/owner"     owner       recordCid
+  mustSee    "SettlementRecord/owner2"    owner2      recordCid
+  mustSee    "SettlementRecord/exchange"  exchange    recordCid
+  mustNotSee "SettlementRecord/public"    publicParty recordCid
+
+  -- CONFIDENTIAL holding: owner + issuer only. Not the regulator, not the
+  -- public, not the other counterparty, not even the exchange at rest.
+  mustSee    "Holding/owner"     owner       holdingCid
+  mustSee    "Holding/issuer"    issuer      holdingCid
+  mustNotSee "Holding/owner2"    owner2      holdingCid
+  mustNotSee "Holding/regulator" regulator   holdingCid
+  mustNotSee "Holding/public"    publicParty holdingCid
+  mustNotSee "Holding/exchange"  exchange    holdingCid
+
+  -- ===== Exercise every stub choice (debug bodies run) =====
+
+  -- UseAuthority -> TransferTo, under the owner's delegated authority. The
+  -- exchange cannot SEE the owner's confidential holding, so the owner
+  -- explicitly discloses it for this one transaction (Canton explicit
+  -- disclosure). This is how settlement moves a confidential holding without
+  -- making the exchange a permanent observer -- confidentiality is preserved.
+  holdingDisc <- fromSome <$> queryDisclosure owner holdingCid
+  _ <- submit (actAs exchange <> discloseMany [holdingDisc]) do
+    exerciseCmd authCid UseAuthority with
+      holdingCid; newOwner = owner2; amount = 1.0
+
+  -- Revoke, on a throwaway authority.
+  revokeAuth <- submit owner do
+    createCmd TradingAuthority with
+      owner; exchange; instrument = "USDC"; maxAmount = 50.0
+  submit owner do exerciseCmd revokeAuth Revoke
+
+  -- Execute, on a throwaway settlement request.
+  reqCid <- submit exchange do
+    createCmd SettlementRequest with
+      exchange
+      result = MatchResult with
+        legs = [ MatchedLeg owner "wETH" (-1.0), MatchedLeg owner2 "wETH" 1.0 ]
+        clearingPrice = 2000.0; totalVolume = 1.0
+  submit exchange do
+    exerciseCmd reqCid Execute with authorities = []; holdings = []
+
+  debug "Checkpoint 1: privacy tiers verified on stubs."
+  pure ()

@@ -1,0 +1,65 @@
+module Settlement where
+
+import Types
+import Holding
+import Delegation
+
+-- Settlement & privacy module: given a MatchResult and the relevant
+-- TradingAuthority contracts, execute all matched legs as ONE atomic
+-- transaction (atomic DvP -- all legs commit or none do), and emit the
+-- disclosure contracts that implement the three visibility tiers.
+
+-- Validation isolated as a pure function with a deterministic result.
+-- Checkpoint 1 stub: always Right (); the real netting / authority / ceiling
+-- checks land in Checkpoint 3, returning a named SettlementError on failure.
+validateBatch : MatchResult -> Either SettlementError ()
+validateBatch _result = Right ()
+
+-- PUBLIC tier. Aggregate only, no party-level detail. Visible to the public
+-- observer and the regulator (the exchange is signatory).
+template AuctionResult
+  with
+    exchange      : Party
+    publicParty   : Party
+    regulator     : Party
+    clearingPrice : Decimal
+    totalVolume   : Decimal
+    timestamp     : Time
+  where
+    signatory exchange
+    observer  publicParty, regulator
+
+-- REGULATED tier. Full per-leg detail, visible to the regulator and to the two
+-- counterparties -- but NOT to the public observer.
+template SettlementRecord
+  with
+    exchange  : Party
+    regulator : Party
+    parties   : [Party]
+    legs      : [MatchedLeg]
+  where
+    signatory exchange
+    observer  regulator, parties
+
+-- Entry point exercised by the exchange. Atomic: archives the giving holdings
+-- and creates the receiving holdings across all legs in one transaction.
+template SettlementRequest
+  with
+    exchange : Party
+    result   : MatchResult
+  where
+    signatory exchange
+
+    -- Checkpoint 1 stub: debugs and returns (). Real (Checkpoint 3) body:
+    --   1. validateBatch result  (fail closed on Left)
+    --   2. for each leg, exercise UseAuthority on the matching authority so all
+    --      transfers occur atomically under the owners' delegated authority
+    --   3. create the AuctionResult + SettlementRecord disclosure contracts
+    choice Execute : ()
+      with
+        authorities : [ContractId TradingAuthority]
+        holdings    : [ContractId Holding]
+      controller exchange
+      do
+        debug "Settlement.Execute stub"
+        return ()

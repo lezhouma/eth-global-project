@@ -1,0 +1,31 @@
+module Types where
+
+-- The module seam between matching (external) and settlement (this repo).
+-- These types are FIXED so both sides can build in parallel. Settlement does
+-- not know or care how the clearing price was derived.
+
+-- A single leg of a matched trade for one party.
+-- delta is signed: positive = party receives, negative = party gives.
+data MatchedLeg = MatchedLeg
+  with
+    party      : Party
+    instrument : Text     -- "wETH" | "USDC"
+    delta      : Decimal
+  deriving (Eq, Show)
+
+-- The full result handed to settlement.
+-- Invariant: for every instrument, the sum of deltas across all legs is 0.
+data MatchResult = MatchResult
+  with
+    legs          : [MatchedLeg]
+    clearingPrice : Decimal      -- USDC per wETH
+    totalVolume   : Decimal      -- in wETH
+  deriving (Eq, Show)
+
+-- Settlement validation error states. Closed set: every choice either returns
+-- a defined value or fails with one of these named errors (security by design).
+data SettlementError
+  = LegsDoNotNet
+  | MissingAuthority Party
+  | AmountOverCeiling Party
+  deriving (Eq, Show)

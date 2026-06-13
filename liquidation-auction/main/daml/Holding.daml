@@ -1,0 +1,32 @@
+module Holding where
+
+-- The single native token template. Two assets ("wETH" | "USDC") are the same
+-- template distinguished by `instrument`. "wETH" is a label only -- no wrap, no
+-- bridge. Confidential tier: a Holding is visible to its owner (signatory) and
+-- the issuer (observer) only; the exchange sees it only transiently, as a
+-- stakeholder of a settlement transaction it is party to.
+template Holding
+  with
+    issuer     : Party
+    owner      : Party
+    instrument : Text       -- "wETH" | "USDC"
+    amount     : Decimal
+  where
+    signatory owner         -- owner authorizes movement of their own holding
+    observer  issuer        -- issuer can see movements of its token
+
+    -- Transfer is exercised inside the atomic settlement transaction. The real
+    -- (Checkpoint 3) body archives this holding and creates a new one owned by
+    -- newOwner; that create needs newOwner's authority, which settlement
+    -- supplies by exercising newOwner's TradingAuthority in the same tx.
+    --
+    -- Checkpoint 1 stub: debugs its input and returns a placeholder holding
+    -- (re-created for the same owner) so the signature/authorization shape is
+    -- validated before the real re-homing logic is frozen.
+    choice TransferTo : ContractId Holding
+      with
+        newOwner : Party
+      controller owner
+      do
+        debug ("Holding.TransferTo stub: newOwner=" <> show newOwner)
+        create this

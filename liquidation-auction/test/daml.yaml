@@ -1,0 +1,10 @@
+sdk-version: 3.5.1
+name: liquidation-auction-test
+source: daml
+version: 0.0.1
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+data-dependencies:
+  - ../main/.daml/dist/liquidation-auction-main-0.0.1.dar
