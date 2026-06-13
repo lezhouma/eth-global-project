@@ -15,15 +15,18 @@ GET  /auction/result  clearing price, trades, settlement (available after close)
 """
 
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 import threading
 import uuid
+import os
 
 from settlement import build_settlement_instructions, submit_settlement
 
 app = Flask(__name__)
+CORS(app)
 
 
 # ---------------------------------------------------------------------------
@@ -334,4 +337,5 @@ if __name__ == "__main__":
     print("  POST /orders          { side, price, quantity, user_id, wallet_address }")
     print("  GET  /auction/status")
     print("  GET  /auction/result\n")
-    app.run(host="0.0.0.0", port=5050, debug=False)
+    port = int(os.environ.get("PORT", 5050))
+    app.run(host="0.0.0.0", port=port, debug=False)
