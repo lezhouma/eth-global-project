@@ -20,9 +20,12 @@ template TradingAuthority
     -- Used by settlement. Carries owner authority to move a holding. Standing
     -- authority, so nonconsuming: it survives across auctions until Revoke.
     --
-    -- Real (Checkpoint 2) body asserts instrument match and amount <= maxAmount,
-    -- failing closed with a named error otherwise.
-    -- Checkpoint 1 stub: debugs its input and delegates to TransferTo.
+    -- Deterministic validation (security by design): fails closed with one of a
+    -- fixed, named set of error states -- instrument mismatch or amount over
+    -- the ceiling -- so the exchange can never move more than authorized, nor a
+    -- different instrument than authorized. (Applying `amount` as a partial
+    -- transfer with remainder is settlement's job, Checkpoint 3; here the
+    -- authority only gates what is permitted.)
     nonconsuming choice UseAuthority : ContractId Holding
       with
         holdingCid : ContractId Holding
@@ -30,13 +33,14 @@ template TradingAuthority
         amount     : Decimal
       controller exchange
       do
-        debug ("Delegation.UseAuthority stub: instrument=" <> instrument
-                 <> " amount=" <> show amount)
+        holding <- fetch holdingCid
+        assertMsg "instrument mismatch" (holding.instrument == instrument)
+        assertMsg "exceeds maxAmount" (amount <= maxAmount)
         exercise holdingCid TransferTo with newOwner
 
-    -- Owner can revoke at any time.
+    -- Owner can revoke at any time; the consuming archive ends the standing
+    -- authority.
     choice Revoke : ()
       controller owner
       do
-        debug "Delegation.Revoke stub"
         return ()

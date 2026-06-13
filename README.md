@@ -79,8 +79,10 @@ the next. See [docs/mdd.md](docs/mdd.md) §7.
 - **Checkpoint 1 — Skeleton (current).** All templates/choices with real
   signatures and stub bodies; the Script asserts the three privacy tiers hold
   and exercises every stub choice. ✅ builds + passes locally.
-- **Checkpoint 2 — Delegation logic.** Real `UseAuthority` (ceiling/instrument
-  checks), `Revoke`; over-limit fails closed.
+- **Checkpoint 2 — Delegation logic (current).** Real `UseAuthority`
+  (instrument + ceiling checks), `Revoke`; over-limit and instrument-mismatch
+  fail closed, revoke archives the authority. ✅ builds + passes locally
+  (`testDelegation`).
 - **Checkpoint 3 — Settlement logic.** Real `Execute` + `validateBatch`; atomic
   swap, rollback on a failing leg, tiers re-asserted on real data.
 

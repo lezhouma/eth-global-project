@@ -114,3 +114,58 @@ testPrivacyTiers = script do
 
   debug "Checkpoint 1: privacy tiers verified on stubs."
   pure ()
+
+-- Checkpoint 2 check. Delegation logic: a TradingAuthority gates exactly one
+-- instrument up to a ceiling, and revoke ends it. We assert the signatory /
+-- observer shape, that over-ceiling and instrument-mismatch fail CLOSED, that a
+-- within-ceiling matching use succeeds, and that Revoke archives the authority.
+testDelegation : Script ()
+testDelegation = script do
+  owner    <- allocatePartyByHint (PartyIdHint "Owner")
+  owner2   <- allocatePartyByHint (PartyIdHint "Owner2")
+  exchange <- allocatePartyByHint (PartyIdHint "Exchange")
+  issuer   <- allocatePartyByHint (PartyIdHint "Issuer")
+  other    <- allocatePartyByHint (PartyIdHint "Other")
+
+  -- owner delegates wETH up to 100 to the exchange.
+  authCid <- submit owner do
+    createCmd TradingAuthority with
+      owner; exchange; instrument = "wETH"; maxAmount = 100.0
+
+  -- owner = signatory (create succeeded under owner's authority); exchange =
+  -- observer; an unrelated party sees nothing.
+  mustSee    "auth/owner(signatory)"   owner    authCid
+  mustSee    "auth/exchange(observer)" exchange authCid
+  mustNotSee "auth/other"              other    authCid
+
+  -- A matching (wETH) and a mismatching (USDC) holding, both owned by owner,
+  -- disclosed to the exchange for the UseAuthority calls.
+  wethCid <- submit owner do
+    createCmd Holding with issuer; owner; instrument = "wETH"; amount = 50.0
+  usdcCid <- submit owner do
+    createCmd Holding with issuer; owner; instrument = "USDC"; amount = 50.0
+  wethDisc <- fromSome <$> queryDisclosure owner wethCid
+  usdcDisc <- fromSome <$> queryDisclosure owner usdcCid
+
+  -- (1) Over-ceiling: 150 > maxAmount 100 -> fail closed.
+  submitMustFail (actAs exchange <> discloseMany [wethDisc]) do
+    exerciseCmd authCid UseAuthority with
+      holdingCid = wethCid; newOwner = owner2; amount = 150.0
+
+  -- (2) Instrument mismatch: authority is wETH, holding is USDC -> fail closed.
+  submitMustFail (actAs exchange <> discloseMany [usdcDisc]) do
+    exerciseCmd authCid UseAuthority with
+      holdingCid = usdcCid; newOwner = owner2; amount = 10.0
+
+  -- (3) Within ceiling + matching instrument -> succeeds.
+  _ <- submit (actAs exchange <> discloseMany [wethDisc]) do
+    exerciseCmd authCid UseAuthority with
+      holdingCid = wethCid; newOwner = owner2; amount = 10.0
+
+  -- (4) Revoke: owner ends the standing authority; it is archived for everyone.
+  submit owner do exerciseCmd authCid Revoke
+  mustNotSee "auth/after-revoke(owner)"    owner    authCid
+  mustNotSee "auth/after-revoke(exchange)" exchange authCid
+
+  debug "Checkpoint 2: delegation gated; over-limit & mismatch fail closed; revoke works."
+  pure ()
