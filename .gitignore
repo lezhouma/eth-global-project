@@ -1,5 +1,25 @@
 # Environment
 .env
+.env.local
 
 # Dependencies
 node_modules/
+
+# Daml / Canton build outputs
+.daml/
+target/
+*.dar
+
+# Local ledger storage and logs
+log/
+*.log
+.canton/
+
+# MCP
+Build-on-Canton-MCP-main/
+
+# IDE
+.vscode/
+
+# OS
+.DS_Store
