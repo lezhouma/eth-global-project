@@ -1,0 +1,167 @@
+module Auction where
+
+import DA.Foldable (forA_)
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Account
+--
+-- Simple operator-controlled balance for a single asset ("USDC" or "TOKEN").
+-- The operator is the sole authority — no user signature needed for
+-- credit/debit, which keeps settlement simple.
+-- Each user gets one Account per asset type, created by the operator at setup.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+template Account
+  with
+    operator : Party
+    owner    : Party
+    asset    : Text     -- "USDC" | "TOKEN"
+    balance  : Decimal
+  where
+    signatory operator
+    observer  owner
+
+    choice Credit : ContractId Account
+      with amount : Decimal
+      controller operator
+      do
+        assertMsg "Credit amount must be positive" (amount > 0.0)
+        create this with balance = balance + amount
+
+    choice Debit : ContractId Account
+      with amount : Decimal
+      controller operator
+      do
+        assertMsg "Insufficient balance" (balance >= amount)
+        assertMsg "Debit amount must be positive" (amount > 0.0)
+        create this with balance = balance - amount
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- BuyEscrow
+--
+-- Created by the operator when a user places a buy limit order.
+-- Flow:
+--   1. Operator debits buyer's USDC Account by (quantity * limitPrice)
+--   2. Operator creates BuyEscrow recording the lock
+--   3a. At settlement : Execute consumes this + credits accounts
+--   3b. If unmatched  : Release returns USDC to buyer
+-- ─────────────────────────────────────────────────────────────────────────────
+
+template BuyEscrow
+  with
+    operator   : Party
+    buyer      : Party
+    orderId    : Text
+    quantity   : Decimal
+    limitPrice : Decimal
+    lockedUsdc : Decimal    -- = quantity * limitPrice
+  where
+    signatory operator
+    observer  buyer
+
+    -- Consumed by AuctionSettlement.Execute — no additional logic needed here.
+    choice ConsumeBuyEscrow : ()
+      controller operator
+      do return ()
+
+    -- Full release: order was unmatched, return locked USDC to buyer.
+    choice ReleaseBuyEscrow : ContractId Account
+      with buyerUsdcCid : ContractId Account
+      controller operator
+      do
+        exercise buyerUsdcCid Credit with amount = lockedUsdc
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- SellEscrow
+--
+-- Created by the operator when a user places a sell limit order.
+-- Flow:
+--   1. Operator debits seller's TOKEN Account by quantity
+--   2. Operator creates SellEscrow recording the lock
+--   3a. At settlement : Execute consumes this + credits accounts
+--   3b. If unmatched  : Release returns tokens to seller
+-- ─────────────────────────────────────────────────────────────────────────────
+
+template SellEscrow
+  with
+    operator     : Party
+    seller       : Party
+    orderId      : Text
+    quantity     : Decimal
+    lockedTokens : Decimal    -- = quantity
+  where
+    signatory operator
+    observer  seller
+
+    choice ConsumeSellEscrow : ()
+      controller operator
+      do return ()
+
+    choice ReleaseSellEscrow : ContractId Account
+      with sellerTokenCid : ContractId Account
+      controller operator
+      do
+        exercise sellerTokenCid Credit with amount = lockedTokens
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- AccountLeg
+--
+-- A single wallet's net position change for one asset.
+-- The TypeScript engine computes these (already netted per wallet) and passes
+-- the list to AuctionSettlement.Execute.
+--
+--   delta > 0  →  credit (receive funds)
+--   delta < 0  →  debit  (pay funds)
+--
+-- Example after a single trade (buyer gets 6 tokens, pays 630 USDC @ 105):
+--   AccountLeg { accountCid = buyerUsdcCid,  delta = -630.0 }
+--   AccountLeg { accountCid = buyerTokenCid, delta =   +6.0 }
+--   AccountLeg { accountCid = sellerUsdcCid, delta = +630.0 }
+--   AccountLeg { accountCid = sellerTokenCid,delta =   -6.0 }
+--   ... plus refund legs if buyer's limit price > clearing price
+-- ─────────────────────────────────────────────────────────────────────────────
+
+data AccountLeg = AccountLeg
+  with
+    accountCid : ContractId Account
+    delta      : Decimal
+  deriving (Eq, Show)
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- AuctionSettlement
+--
+-- Created by the operator immediately after uncrossing.
+-- The TypeScript engine calls Execute with:
+--   - all buy  escrow CIDs to consume
+--   - all sell escrow CIDs to consume
+--   - net per-wallet account legs (already netted across trades)
+--
+-- Everything happens in one atomic Canton transaction.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+template AuctionSettlement
+  with
+    operator  : Party
+    auctionId : Text
+  where
+    signatory operator
+
+    choice Execute : ()
+      with
+        buyEscrowCids  : [ContractId BuyEscrow]
+        sellEscrowCids : [ContractId SellEscrow]
+        legs           : [AccountLeg]
+      controller operator
+      do
+        -- Consume all escrows (underlying funds already moved at order time)
+        forA_ buyEscrowCids  (\cid -> exercise cid ConsumeBuyEscrow)
+        forA_ sellEscrowCids (\cid -> exercise cid ConsumeSellEscrow)
+        -- Apply net account movements atomically
+        forA_ legs (\leg ->
+          if leg.delta > 0.0
+            then exercise leg.accountCid Credit with amount = leg.delta
+            else exercise leg.accountCid Debit  with amount = negate leg.delta)

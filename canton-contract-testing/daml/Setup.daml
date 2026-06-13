@@ -1,0 +1,160 @@
+module Setup where
+
+import Daml.Script
+import Auction
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- seedAccounts
+--
+-- Run this once against your Canton network to create demo wallets.
+-- Each user gets a USDC account and a TOKEN account seeded with initial
+-- balances — this is your "faucet" for the demo.
+--
+-- Run via Canton console:
+--   scripts run --dar .daml/dist/auction-contracts-0.0.1.dar --script-name Setup:seedAccounts
+-- ─────────────────────────────────────────────────────────────────────────────
+
+seedAccounts : Script ()
+seedAccounts = do
+  operator <- allocatePartyByHint (PartyIdHint "Operator")
+  alice    <- allocatePartyByHint (PartyIdHint "Alice")
+  bob      <- allocatePartyByHint (PartyIdHint "Bob")
+  charlie  <- allocatePartyByHint (PartyIdHint "Charlie")
+
+  -- Alice: 10,000 USDC, no tokens (she will buy)
+  submit operator do
+    createCmd Account with operator, owner = alice, asset = "USDC",  balance = 10000.0
+  submit operator do
+    createCmd Account with operator, owner = alice, asset = "TOKEN", balance = 0.0
+
+  -- Bob: 2,000 USDC, 50 tokens (he will sell)
+  submit operator do
+    createCmd Account with operator, owner = bob, asset = "USDC",  balance = 2000.0
+  submit operator do
+    createCmd Account with operator, owner = bob, asset = "TOKEN", balance = 50.0
+
+  -- Charlie: 8,000 USDC, 20 tokens (mixed — buys and sells)
+  submit operator do
+    createCmd Account with operator, owner = charlie, asset = "USDC",  balance = 8000.0
+  submit operator do
+    createCmd Account with operator, owner = charlie, asset = "TOKEN", balance = 20.0
+
+  return ()
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- demoFullFlow
+--
+-- Full end-to-end demo in a single script — useful for testing locally.
+--
+-- Scenario:
+--   Alice  buys  20 TOKEN @ 105 USDC  (locks 2,100 USDC)
+--   Charlie buys 10 TOKEN @ 102 USDC  (locks 1,020 USDC)
+--   Bob    sells 15 TOKEN @ 98  USDC  (locks 15 tokens)
+--
+-- Matching result (marginal buyer convention):
+--   Clearing price = 105  (excess buys — Alice's bid sets the price)
+--   Alice buys 15 TOKEN from Bob @ 105   notional = 1,575 USDC
+--   Charlie gets nothing (102 < clearing price of 105)
+--
+-- Settlement legs (net per wallet):
+--   Alice   USDC:  -1575  (spent)    → +525 USDC refund from escrow (2100 - 1575)
+--   Alice   TOKEN: +15
+--   Bob     USDC:  +1575
+--   Bob     TOKEN: -15    (fully matched, no token refund)
+--   Charlie USDC:  +1020 refund (full release, no trade)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+demoFullFlow : Script ()
+demoFullFlow = do
+  operator <- allocatePartyByHint (PartyIdHint "Operator")
+  alice    <- allocatePartyByHint (PartyIdHint "Alice")
+  bob      <- allocatePartyByHint (PartyIdHint "Bob")
+  charlie  <- allocatePartyByHint (PartyIdHint "Charlie")
+
+  -- ── 1. Create initial accounts ──────────────────────────────────────────
+
+  aliceUsdcCid  <- submit operator do createCmd Account with operator, owner = alice,   asset = "USDC",  balance = 10000.0
+  aliceTokenCid <- submit operator do createCmd Account with operator, owner = alice,   asset = "TOKEN", balance = 0.0
+  bobUsdcCid    <- submit operator do createCmd Account with operator, owner = bob,     asset = "USDC",  balance = 2000.0
+  bobTokenCid   <- submit operator do createCmd Account with operator, owner = bob,     asset = "TOKEN", balance = 50.0
+  charlieUsdcCid  <- submit operator do createCmd Account with operator, owner = charlie, asset = "USDC",  balance = 8000.0
+  charlieTokenCid <- submit operator do createCmd Account with operator, owner = charlie, asset = "TOKEN", balance = 0.0
+
+  -- ── 2. Place orders: debit accounts and create escrows ─────────────────
+
+  -- Alice: buy 20 @ 105 → lock 2,100 USDC
+  aliceUsdcCid2 <- submit operator do
+    exerciseCmd aliceUsdcCid Debit with amount = 2100.0
+  aliceEscrowCid <- submit operator do
+    createCmd BuyEscrow with
+      operator
+      buyer      = alice
+      orderId    = "order-alice-buy-1"
+      quantity   = 20.0
+      limitPrice = 105.0
+      lockedUsdc = 2100.0
+
+  -- Charlie: buy 10 @ 102 → lock 1,020 USDC
+  charlieUsdcCid2 <- submit operator do
+    exerciseCmd charlieUsdcCid Debit with amount = 1020.0
+  charlieEscrowCid <- submit operator do
+    createCmd BuyEscrow with
+      operator
+      buyer      = charlie
+      orderId    = "order-charlie-buy-1"
+      quantity   = 10.0
+      limitPrice = 102.0
+      lockedUsdc = 1020.0
+
+  -- Bob: sell 15 @ 98 → lock 15 tokens
+  bobTokenCid2 <- submit operator do
+    exerciseCmd bobTokenCid Debit with amount = 15.0
+  bobEscrowCid <- submit operator do
+    createCmd SellEscrow with
+      operator
+      seller       = bob
+      orderId      = "order-bob-sell-1"
+      quantity     = 15.0
+      lockedTokens = 15.0
+
+  -- ── 3. Auction closes — TS engine uncrosses ─────────────────────────────
+  --   Clearing price = 105  (marginal buyer = Alice)
+  --   Alice buys 15 from Bob @ 105  (Charlie's 102 < 105, excluded)
+
+  -- ── 4. Operator creates AuctionSettlement ───────────────────────────────
+  settlementCid <- submit operator do
+    createCmd AuctionSettlement with
+      operator
+      auctionId = "auction-demo-001"
+
+  -- ── 5. Execute settlement ────────────────────────────────────────────────
+  --
+  -- Net legs:
+  --   Alice  USDC:   debit 1575 spent  → but escrow already debited 2100
+  --                  credit 525 refund (2100 - 1575)
+  --   Alice  TOKEN:  credit 15
+  --   Bob    USDC:   credit 1575
+  --   Bob    TOKEN:  (tokens already in escrow, no refund needed — fully matched)
+  --   Charlie USDC:  (fully release — handled separately below)
+  --
+  -- Note: Alice's USDC leg is net +525 (refund only; the 1575 "cost" was
+  -- already debited from her account when the escrow was created and the
+  -- 1575 now goes to Bob from the escrowed pool).
+  -- We represent this as two separate legs for clarity.
+
+  submit operator do
+    exerciseCmd settlementCid Execute with
+      buyEscrowCids  = [aliceEscrowCid]
+      sellEscrowCids = [bobEscrowCid]
+      legs =
+        [ AccountLeg { accountCid = aliceUsdcCid2,  delta =  525.0  }  -- USDC refund to Alice
+        , AccountLeg { accountCid = aliceTokenCid,  delta =   15.0  }  -- tokens to Alice
+        , AccountLeg { accountCid = bobUsdcCid,     delta = 1575.0  }  -- USDC to Bob
+        ]
+
+  -- ── 6. Release Charlie's escrow (no trade, full refund) ─────────────────
+  submit operator do
+    exerciseCmd charlieEscrowCid ReleaseBuyEscrow with buyerUsdcCid = charlieUsdcCid2
+
+  return ()
