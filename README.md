@@ -53,7 +53,8 @@ dpm build --all                 # builds the `main` (contracts) and `test` packa
 dpm test --package-root test    # runs the Daml Script suite
 ```
 
-Expected: `daml/Test.daml:testPrivacyTiers: ok`. The build is warning-clean.
+Expected: all four scripts pass — `testPrivacyTiers`, `testDelegation`,
+`testSettlement`, `testSettlementRollback`. The build is warning-clean.
 
 ## Layout
 
@@ -63,12 +64,12 @@ liquidation-auction/
 ├── main/                       # contracts -> liquidation-auction-main-0.0.1.dar
 │   └── daml/
 │       ├── Types.daml          # MatchedLeg / MatchResult seam + SettlementError
-│       ├── Holding.daml        # native token; confidential tier
-│       ├── Delegation.daml     # TradingAuthority: capped, revocable delegation
-│       └── Settlement.daml     # SettlementRequest.Execute; AuctionResult, SettlementRecord
+│       ├── Holding.daml        # native token; confidential tier (no choices)
+│       ├── Delegation.daml     # TradingAuthority: DebitHolding / CreditHolding / Revoke
+│       └── Settlement.daml     # Execute + validateBatch; AuctionResult, SettlementRecord
 └── test/
     └── daml/
-        └── Test.daml           # privacy-tier assertions + stub-choice exercises
+        └── Test.daml           # privacy / delegation / settlement / rollback scripts
 ```
 
 ## Build plan (checkpoints)
@@ -76,15 +77,15 @@ liquidation-auction/
 Each checkpoint builds, is checked with a Daml Script, and is committed before
 the next. See [docs/mdd.md](docs/mdd.md) §7.
 
-- **Checkpoint 1 — Skeleton (current).** All templates/choices with real
-  signatures and stub bodies; the Script asserts the three privacy tiers hold
-  and exercises every stub choice. ✅ builds + passes locally.
-- **Checkpoint 2 — Delegation logic (current).** Real `UseAuthority`
-  (instrument + ceiling checks), `Revoke`; over-limit and instrument-mismatch
-  fail closed, revoke archives the authority. ✅ builds + passes locally
-  (`testDelegation`).
-- **Checkpoint 3 — Settlement logic.** Real `Execute` + `validateBatch`; atomic
-  swap, rollback on a failing leg, tiers re-asserted on real data.
+- **Checkpoint 1 — Skeleton.** All templates/choices with real signatures; the
+  Script asserts the three privacy tiers hold. ✅ `testPrivacyTiers`.
+- **Checkpoint 2 — Delegation logic.** Delegation gates instrument + ceiling and
+  fails closed; `Revoke` archives the authority. ✅ `testDelegation`.
+- **Checkpoint 3 — Settlement logic.** Real `Execute` + `validateBatch`: a full
+  atomic swap (debit each giver / credit each receiver under their own delegated
+  authority), balances asserted, a failing leg rolls back **all** legs, and the
+  tiers re-asserted on the real emitted data. ✅ `testSettlement` +
+  `testSettlementRollback`.
 
 ## Deployment
 

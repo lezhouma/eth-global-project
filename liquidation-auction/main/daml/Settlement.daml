@@ -1,5 +1,8 @@
 module Settlement where
 
+import DA.Foldable (mapA_)
+import DA.List (dedup)
+
 import Types
 import Holding
 import Delegation
@@ -9,11 +12,18 @@ import Delegation
 -- transaction (atomic DvP -- all legs commit or none do), and emit the
 -- disclosure contracts that implement the three visibility tiers.
 
--- Validation isolated as a pure function with a deterministic result.
--- Checkpoint 1 stub: always Right (); the real netting / authority / ceiling
--- checks land in Checkpoint 3, returning a named SettlementError on failure.
+-- Validation isolated as a pure function with a deterministic result. The legs
+-- must net to zero per instrument, else value would not be conserved.
+-- Authority/ceiling failures cannot be detected purely (they need ledger data);
+-- they surface during Execute as fail-closed asserts that roll back the whole
+-- atomic transaction.
 validateBatch : MatchResult -> Either SettlementError ()
-validateBatch _result = Right ()
+validateBatch result =
+  let instruments = dedup (map (\leg -> leg.instrument) result.legs)
+      netsZero inst =
+        sum (map (\leg -> leg.delta)
+              (filter (\leg -> leg.instrument == inst) result.legs)) == 0.0
+  in if all netsZero instruments then Right () else Left LegsDoNotNet
 
 -- PUBLIC tier. Aggregate only, no party-level detail. Visible to the public
 -- observer and the regulator (the exchange is signatory).
@@ -41,25 +51,83 @@ template SettlementRecord
     signatory exchange
     observer  regulator, parties
 
--- Entry point exercised by the exchange. Atomic: archives the giving holdings
--- and creates the receiving holdings across all legs in one transaction.
+-- Entry point exercised by the exchange.
 template SettlementRequest
   with
-    exchange : Party
-    result   : MatchResult
+    exchange    : Party
+    publicParty : Party
+    regulator   : Party
+    result      : MatchResult
   where
     signatory exchange
 
-    -- Checkpoint 1 stub: debugs and returns (). Real (Checkpoint 3) body:
-    --   1. validateBatch result  (fail closed on Left)
-    --   2. for each leg, exercise UseAuthority on the matching authority so all
-    --      transfers occur atomically under the owners' delegated authority
-    --   3. create the AuctionResult + SettlementRecord disclosure contracts
+    -- Atomic settlement. `holdings` are the giver holdings, in the same order as
+    -- the giving legs (delta < 0), each explicitly disclosed to the exchange.
+    -- All legs commit or none do: any failing assert rolls everything back
+    -- (atomic DvP, zero settlement-risk window, so no clearing counterparty).
+    --   1. validateBatch result            -- fail closed on Left
+    --   2. debit each giver under its authority; credit each receiver under its
+    --      authority -- all under the owners' delegated authority, in one tx
+    --   3. emit the AuctionResult + SettlementRecord disclosure contracts
     choice Execute : ()
       with
         authorities : [ContractId TradingAuthority]
         holdings    : [ContractId Holding]
       controller exchange
       do
-        debug "Settlement.Execute stub"
-        return ()
+        case validateBatch result of
+          Left e   -> abort ("validateBatch failed: " <> show e)
+          Right () -> pure ()
+
+        now <- getTime
+
+        -- The exchange is an observer of every authority, so it may fetch them
+        -- to map (owner, instrument) -> authority.
+        authData <- mapA
+          (\cid -> do a <- fetch cid; pure (a.owner, a.instrument, cid))
+          authorities
+        let findAuthCid p inst =
+              (\(_, _, c) -> c) <$> find (\(o, i, _) -> o == p && i == inst) authData
+
+        let givers    = filter (\leg -> leg.delta < 0.0) result.legs
+        let receivers = filter (\leg -> leg.delta > 0.0) result.legs
+        assertMsg "holdings count must match giving legs"
+          (length holdings == length givers)
+
+        -- GIVE side: debit each giver; learn each instrument's issuer.
+        issuerPairs <- mapA
+          (\(leg, hCid) -> do
+             authCid <- case findAuthCid leg.party leg.instrument of
+               Some c -> pure c
+               None   -> abort ("missing authority for giver " <> show leg.party)
+             exercise authCid DebitHolding with
+               holdingCid = hCid; amount = negate leg.delta)
+          (zip givers holdings)
+
+        -- RECEIVE side: credit each receiver with the matching instrument issuer.
+        mapA_
+          (\leg -> do
+             authCid <- case findAuthCid leg.party leg.instrument of
+               Some c -> pure c
+               None   -> abort ("missing authority for receiver " <> show leg.party)
+             iss <- case find (\(i, _) -> i == leg.instrument) issuerPairs of
+               Some (_, p) -> pure p
+               None        -> abort ("no issuer for " <> leg.instrument)
+             exercise authCid CreditHolding with issuer = iss; amount = leg.delta)
+          receivers
+
+        -- Disclosure tiers, emitted on real settlement data.
+        let parties = dedup (map (\leg -> leg.party) result.legs)
+        _ <- create AuctionResult with
+               exchange
+               publicParty
+               regulator
+               clearingPrice = result.clearingPrice
+               totalVolume = result.totalVolume
+               timestamp = now
+        _ <- create SettlementRecord with
+               exchange
+               regulator
+               parties
+               legs = result.legs
+        pure ()

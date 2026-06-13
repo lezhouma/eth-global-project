@@ -2,11 +2,20 @@ module Delegation where
 
 import Holding
 
--- Delegation module: an owner grants the exchange bounded authority to move a
--- specific instrument on the owner's behalf, up to maxAmount, until revoked.
--- The owner is the signatory, so when the exchange exercises a choice during
--- settlement the resulting sub-transaction carries the owner's authority --
--- the standard Daml delegation pattern. No private key is ever passed.
+-- Delegation module: an owner grants the exchange bounded authority over a
+-- specific instrument, up to maxAmount, until revoked. The owner is the
+-- signatory, so when the exchange exercises a choice the resulting
+-- sub-transaction carries the owner's authority -- the standard Daml delegation
+-- pattern. No private key is ever passed.
+--
+-- A settlement leg is one of two halves, each authorised by the party it
+-- affects, so that authority is never overreached:
+--   * DebitHolding  -- the GIVER's authority removes `amount` from one of the
+--                      owner's holdings (archives it, leaves any remainder).
+--   * CreditHolding -- the RECEIVER's authority creates a new holding of
+--                      `amount` for the owner.
+-- Settlement runs the matching debit and credit in one atomic transaction, so
+-- nothing is minted or destroyed (the batch nets to zero, validated upstream).
 template TradingAuthority
   with
     owner      : Party
@@ -17,26 +26,44 @@ template TradingAuthority
     signatory owner
     observer  exchange
 
-    -- Used by settlement. Carries owner authority to move a holding. Standing
-    -- authority, so nonconsuming: it survives across auctions until Revoke.
-    --
-    -- Deterministic validation (security by design): fails closed with one of a
-    -- fixed, named set of error states -- instrument mismatch or amount over
-    -- the ceiling -- so the exchange can never move more than authorized, nor a
-    -- different instrument than authorized. (Applying `amount` as a partial
-    -- transfer with remainder is settlement's job, Checkpoint 3; here the
-    -- authority only gates what is permitted.)
-    nonconsuming choice UseAuthority : ContractId Holding
+    -- GIVE side. Remove `amount` of this instrument from the owner's holding,
+    -- archiving it and leaving the owner any remainder. Returns the holding's
+    -- (instrument, issuer) so settlement can mint the matching credit with the
+    -- right issuer. Deterministic validation (security by design): fails closed
+    -- on instrument mismatch, over-ceiling, wrong owner, or insufficient
+    -- balance, so the exchange can never move more than authorized nor a
+    -- different instrument. Standing authority -> nonconsuming.
+    nonconsuming choice DebitHolding : (Text, Party)
       with
         holdingCid : ContractId Holding
-        newOwner   : Party
         amount     : Decimal
       controller exchange
       do
         holding <- fetch holdingCid
-        assertMsg "instrument mismatch" (holding.instrument == instrument)
+        assertMsg "instrument mismatch"     (holding.instrument == instrument)
+        assertMsg "holding not owned by authority owner" (holding.owner == owner)
+        assertMsg "exceeds maxAmount"       (amount <= maxAmount)
+        assertMsg "exceeds holding balance" (amount <= holding.amount)
+        archive holdingCid
+        let remainder = holding.amount - amount
+        if remainder > 0.0
+          then do
+            _ <- create (holding with amount = remainder)
+            pure ()
+          else pure ()
+        pure (holding.instrument, holding.issuer)
+
+    -- RECEIVE side. Create a new holding of `amount` of this instrument for the
+    -- owner. Gated by the same ceiling. The issuer is supplied by settlement
+    -- (taken from the giver's debited holding of the same instrument).
+    nonconsuming choice CreditHolding : ContractId Holding
+      with
+        issuer : Party
+        amount : Decimal
+      controller exchange
+      do
         assertMsg "exceeds maxAmount" (amount <= maxAmount)
-        exercise holdingCid TransferTo with newOwner
+        create Holding with issuer; owner; instrument; amount
 
     -- Owner can revoke at any time; the consuming archive ends the standing
     -- authority.
