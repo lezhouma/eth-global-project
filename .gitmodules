@@ -1,0 +1,3 @@
+[submodule "front-end/eth-nyc-26"]
+	path = front-end/eth-nyc-26
+	url = https://github.com/s15p2/eth-nyc-26.git
