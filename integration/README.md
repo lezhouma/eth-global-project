@@ -41,7 +41,13 @@ match_result = {
     "clearingPrice": "2000.0",
     "totalVolume": "1.0",
 }
-resp = settle(match_result)      # -> {"updateId": ..., "completionOffset": ...}
+resp = settle(match_result)
+# -> {"transactionId": "1220…",      # the Canton transaction (update) id
+#     "updateId": "1220…",           # alias, back-compat
+#     "completionOffset": 2282147,
+#     "createdContracts": {          # so the UI can deep-link to each
+#       "Settlement:AuctionResult":   "00…",
+#       "Settlement:SettlementRecord":"00…"}}
 ```
 
 Decimals are JSON strings. The batch must net to zero per instrument (the Daml

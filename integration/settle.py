@@ -42,7 +42,19 @@ def load_state():
 
 
 def settle(match, client=None, command_id=None):
-    """Submit one atomic settlement. Returns the ledger response (updateId)."""
+    """Submit one atomic settlement.
+
+    Returns a dict the front end can use directly:
+        {
+          "transactionId": "1220…",      # the Canton transaction (update) id
+          "updateId": "1220…",           # same value, kept for back-compat
+          "completionOffset": 2281002,
+          "createdContracts": {          # contract ids this settlement emitted,
+            "Settlement:AuctionResult": "00…",   # so the UI can link to each
+            "Settlement:SettlementRecord": "00…",
+          },
+        }
+    """
     c = client or LedgerClient()
     parties = load_state()["parties"]
     pid = lambda label: parties[label]
@@ -92,7 +104,7 @@ def settle(match, client=None, command_id=None):
         "clearingPrice": str(match["clearingPrice"]),
         "totalVolume": str(match["totalVolume"]),
     }
-    return c.create_and_exercise(
+    resp = c.create_and_exercise(
         "Settlement:SettlementRequest",
         {"exchange": pid("exchange"), "publicParty": pid("publicParty"),
          "regulator": pid("regulator"), "result": result},
@@ -100,6 +112,46 @@ def settle(match, client=None, command_id=None):
         pid("exchange"), command_id or f"settle-{os.urandom(5).hex()}",
         disclosed=disclosed,
     )
+    update_id = resp.get("updateId")
+    offset = resp.get("completionOffset")
+    return {
+        "transactionId": update_id,
+        "updateId": update_id,
+        "completionOffset": offset,
+        "createdContracts": _created_in_tx(c, pid("exchange"), update_id, offset),
+    }
+
+
+def _created_in_tx(client, exchange_pid, update_id, offset):
+    """Contract ids created by the settlement transaction, keyed by template.
+
+    Best-effort: reads the exchange's update stream around `offset` and matches
+    the transaction by id. Lets the front end deep-link to the AuctionResult and
+    SettlementRecord this settlement produced. The transactionId is authoritative
+    regardless; if this lookup fails it just returns {}.
+    """
+    if not update_id or offset is None:
+        return {}
+    wildcard = {"identifierFilter": {"WildcardFilter": {"value": {"includeCreatedEventBlob": False}}}}
+    body = {
+        "beginExclusive": max(0, offset - 5),
+        "endInclusive": offset,
+        "filter": {"filtersByParty": {exchange_pid: {"cumulative": [wildcard]}}},
+        "verbose": True,
+    }
+    created = {}
+    try:
+        for u in client._call("POST", "/v2/updates/flats", body):
+            tx = u.get("update", {}).get("Transaction", {}).get("value")
+            if not tx or tx.get("updateId") != update_id:
+                continue
+            for ev in tx.get("events", []):
+                v = ev.get("CreatedEvent")
+                if v:
+                    created[":".join(v["templateId"].split(":")[-2:])] = v["contractId"]
+    except Exception:
+        pass
+    return created
 
 
 def _print_balances(c, parties):
@@ -118,7 +170,9 @@ def main():
     print("balances before:")
     _print_balances(c, parties)
     resp = settle(match, client=c)
-    print("settled — updateId:", resp.get("updateId"))
+    print("settled — transactionId:", resp["transactionId"])
+    for tmpl, cid in resp["createdContracts"].items():
+        print(f"  created {tmpl}: {cid}")
     print("balances after:")
     _print_balances(c, parties)
 
