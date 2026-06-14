@@ -205,7 +205,12 @@ def _run_uncross():
     # Build per-wallet settlement instructions and submit to Canton
     if result["trades"]:
         instructions = build_settlement_instructions(result["trades"])
-        canton_response = submit_settlement(instructions, auction_id)
+        canton_response = submit_settlement(
+            result["trades"],
+            result["clearing_price"],
+            result["matched_quantity"],
+            auction_id,
+        )
         result["settlement"] = {
             "instructions": instructions,
             "canton_response": canton_response,
