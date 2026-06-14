@@ -1,0 +1,12 @@
+{
+  "run": "manual",
+  "parties": {
+    "exchange": "laExchange::1220a14ca128063b8dc9d1ebb0bd22633be9f2168500f4dbc1ecaeb1855b14e5acf8",
+    "ownerA": "laOwnerA::1220a14ca128063b8dc9d1ebb0bd22633be9f2168500f4dbc1ecaeb1855b14e5acf8",
+    "ownerB": "laOwnerB::1220a14ca128063b8dc9d1ebb0bd22633be9f2168500f4dbc1ecaeb1855b14e5acf8",
+    "regulator": "laRegulator::1220a14ca128063b8dc9d1ebb0bd22633be9f2168500f4dbc1ecaeb1855b14e5acf8",
+    "publicParty": "laPublic::1220a14ca128063b8dc9d1ebb0bd22633be9f2168500f4dbc1ecaeb1855b14e5acf8",
+    "issuer": "laIssuer::1220a14ca128063b8dc9d1ebb0bd22633be9f2168500f4dbc1ecaeb1855b14e5acf8"
+  },
+  "packageId": "20450e6e5f7e90c2115f45d318b3146d6a763a875d9195cf18875823fbe5a04f"
+}
