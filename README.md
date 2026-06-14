@@ -1,14 +1,20 @@
-# Liquidation Auction on Canton
+# datum
 
 A liquidation auction where matched orders settle **atomically** on a Canton
-ledger, and the *same* set of contracts exposes **three different views to three
-different audiences** — public, regulated, and confidential. Privacy is the
-product; authorization is declarative (delegated authority via
-signatory/controller roles, never keys).
+ledger, and the *same* contracts expose **three views to three audiences** —
+public, regulated, confidential. Privacy is the product; authorization is
+declarative (delegated authority via signatory/controller roles, never keys).
 
-This repo covers the **delegation** and **settlement** modules and the
-**privacy model** that spans them. Matching is an external module, consumed only
-through the fixed `MatchResult` seam type (see [docs/mdd.md](docs/mdd.md)).
+## Privacy tiers (the centerpiece)
+
+All three tiers come from one mechanism — `observer` declarations. Same auction,
+three views:
+
+| Tier             | Contract           | Visible to                                      | Contents                     |
+| ---------------- | ------------------ | ----------------------------------------------- | ---------------------------- |
+| **Public**       | `AuctionResult`    | `publicParty`, `regulator`, `exchange`          | Clearing price, volume, time |
+| **Regulated**    | `SettlementRecord` | `regulator`, the two counterparties, `exchange` | Full per-leg detail          |
+| **Confidential** | `Holding`          | owner + `issuer` (+ `exchange`, only via just-in-time disclosure during a settlement it runs) | Individual positions |
 
 ## Architecture
 
@@ -16,92 +22,66 @@ through the fixed `MatchResult` seam type (see [docs/mdd.md](docs/mdd.md)).
  Asset owner ──grants capped authority──▶ Delegation (TradingAuthority)
                                                   │ active authorities
  Matching engine ──matched legs + price──▶ Settlement (SettlementRequest.Execute)
-   (external, off-ledger)                         │ atomic transfer of Holdings
+   (off-ledger)                                   │ atomic transfer of Holdings
                                                   ▼
                           Disclosure contracts (public / regulated tiers)
 ```
 
-Only delegation and settlement are in scope here; matching is a black box.
+Delegation and settlement are on-ledger; matching runs off-ledger and reaches the
+ledger through the integration layer.
 
-## Privacy tiers (the demo centerpiece)
-
-All three tiers are built from the same mechanism — `observer` declarations.
-Same auction, three views:
-
-| Tier             | Contract           | Visible to                                   | Contents                       |
-| ---------------- | ------------------ | -------------------------------------------- | ------------------------------ |
-| **Public**       | `AuctionResult`    | `publicParty`, `regulator`, `exchange`       | Clearing price, volume, time   |
-| **Regulated**    | `SettlementRecord` | `regulator`, the two counterparties, `exchange` | Full per-leg detail         |
-| **Confidential** | `Holding`          | owner + `issuer` (+ `exchange`, only via just-in-time disclosure during a settlement it runs) | Individual positions |
-
-## Toolchain
-
-Uses [`dpm`](docs/mdd.md) (NOT the deprecated `daml-assistant`). The SDK version
-is pinned in `liquidation-auction/multi-package.yaml` (`sdk-version: 3.5.1`).
+## Quick start
 
 ```sh
-dpm install 3.5.1   # once, if not already installed
+git clone --recursive https://github.com/lezhouma/eth-global-project.git
+cd eth-global-project    # if you cloned without --recursive: git submodule update --init
 ```
 
-## Build & test
-
-From `liquidation-auction/`:
+**1 — Build & test the contracts.** Needs [`dpm`](docs/mdd.md) (NOT the deprecated
+`daml-assistant`); the SDK is pinned in `liquidation-auction/multi-package.yaml`.
 
 ```sh
+dpm install 3.5.1                  # once, if not already installed
 cd liquidation-auction
-dpm build --all                 # builds the `main` (contracts) and `test` packages
-dpm test --package-root test    # runs the Daml Script suite
+dpm build --all                   # main (contracts) + test packages
+dpm test --package-root test      # 4 scripts, warning-clean
 ```
 
-Expected: all four scripts pass — `testPrivacyTiers`, `testDelegation`,
-`testSettlement`, `testSettlementRollback`. The build is warning-clean.
+All four pass: `testPrivacyTiers`, `testDelegation`, `testSettlement`,
+`testSettlementRollback`.
+
+**2 — Run the demo on DevNet.** Python 3, stdlib only. First put a client secret
+in `integration/.env` (`cp integration/.env.example integration/.env`) — see
+[integration/README.md](integration/README.md) for obtaining it.
+
+```sh
+cd integration
+python3 onboard.py     # one-time: parties, holdings, authorities → devnet_state.json
+python3 settle.py      # the demo swap: 1 wETH ⇄ 2000 USDC
+```
+
+**3 — Explorer.** The privacy model, made visual — switch viewer, watch the same
+transaction reveal different detail.
+
+```sh
+python3 integration/explorer/server.py     # → http://127.0.0.1:8000
+```
 
 ## Layout
 
-```
-liquidation-auction/
-├── multi-package.yaml          # pins sdk-version; lists the two packages
-├── main/                       # contracts -> liquidation-auction-main-0.0.1.dar
-│   └── daml/
-│       ├── Types.daml          # MatchedLeg / MatchResult seam + SettlementError
-│       ├── Holding.daml        # native token; confidential tier (no choices)
-│       ├── Delegation.daml     # TradingAuthority: DebitHolding / CreditHolding / Revoke
-│       └── Settlement.daml     # Execute + validateBatch; AuctionResult, SettlementRecord
-└── test/
-    └── daml/
-        └── Test.daml           # privacy / delegation / settlement / rollback scripts
-```
-
-## Build plan (checkpoints)
-
-Each checkpoint builds, is checked with a Daml Script, and is committed before
-the next. See [docs/mdd.md](docs/mdd.md) §7.
-
-- **Checkpoint 1 — Skeleton.** All templates/choices with real signatures; the
-  Script asserts the three privacy tiers hold. ✅ `testPrivacyTiers`.
-- **Checkpoint 2 — Delegation logic.** Delegation gates instrument + ceiling and
-  fails closed; `Revoke` archives the authority. ✅ `testDelegation`.
-- **Checkpoint 3 — Settlement logic.** Real `Execute` + `validateBatch`: a full
-  atomic swap (debit each giver / credit each receiver under their own delegated
-  authority), balances asserted, a failing leg rolls back **all** legs, and the
-  tiers re-asserted on the real emitted data. ✅ `testSettlement` +
-  `testSettlementRollback`.
+- `liquidation-auction/` — Daml contracts (`Types` / `Holding` / `Delegation` /
+  `Settlement`) plus the Daml Script test suite.
+- `matching_engine/` — off-ledger matcher (Python/Flask, deploys to fly.io);
+  consumed only through the fixed `MatchResult` seam ([docs/mdd.md](docs/mdd.md)).
+- `integration/` — Python client for the Canton JSON Ledger API v2
+  (`canton_client`, `onboard`, `settle`).
+- `integration/explorer/` — party-scoped tx viewer; `explorer-cf/` deploys it to
+  Cloudflare Pages. See [integration/explorer/README.md](integration/explorer/README.md).
+- `front-end/eth-nyc-26/` — auction UI (git submodule, own README).
+- `docs/mdd.md` — design doc: checkpoints, the seam, references.
 
 ## Deployment
 
-The contracts deploy to Canton **DevNet** by uploading the built
-`liquidation-auction-main-0.0.1.dar`. Deployment is performed manually (see
-[docs/mdd.md](docs/mdd.md) for the Seaport reference).
-
-## Design notes
-
-- **Why no clearing counterparty:** settlement is one atomic Daml transaction —
-  all legs commit or none do, so the settlement-risk window is zero.
-- **Delegation, not keys:** the exchange moves an owner's asset only by
-  exercising that owner's `TradingAuthority`, which carries the owner's
-  authority into the sub-transaction. The ceiling and instrument checks bound
-  exactly what the exchange can do.
-- **Confidential holdings + delegated movement:** the exchange is *not* a
-  permanent observer of holdings. To move one, the owner discloses it to the
-  exchange just for that transaction (Canton explicit disclosure), so
-  confidentiality is preserved while delegation still works.
+Contracts → upload `liquidation-auction-main-0.0.1.dar` to Canton **DevNet**
+(manual; see [docs/mdd.md](docs/mdd.md)). Engine → fly.io
+(`matching_engine/fly.toml`). Explorer → Cloudflare Pages (`integration/explorer-cf/`).
